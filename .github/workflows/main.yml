@@ -1,156 +1,245 @@
 name: Main Taski workflow
 
+# Workflow запускается при push в ветку main
 on:
   push:
     branches:
       - main
 
 jobs:
+
+  # ============================================================
+  # ЗАДАЧА №1 — ПРОВЕРКА БЭКЕНДА
+  # ============================================================
   tests:
     runs-on: ubuntu-latest
-    # Блок services аналогичен docker-compose.yml
+
+    # Блок services аналогичен docker-compose.yml.
+    # Здесь запускаем PostgreSQL, который понадобится Django-тестам.
     services:
       postgres:
         image: postgres:13.10
-        # Указываем имя тестовой базы, имя и пароль пользователя в открытом виде,
-        # ведь эта база будет работать только во время прогона тестов
+
+        # Указываем имя тестовой базы, имя и пароль пользователя.
+        # Эта база существует только во время выполнения тестов.
         env:
           POSTGRES_USER: django_user
           POSTGRES_PASSWORD: <PASSWORD>
           POSTGRES_DB: django_db
+
         ports:
           - 5432:5432
-        # Эта конструкция описывает проверку готовности сервиса postgres
-        # Если её не будет, то тесты могут запуститься раньше, чем сервер PostgreSQL
-        # В результате тесты опять решат, что базы нет, — и упадут
+
+        # Проверяем готовность PostgreSQL.
+        # Без этого тесты могут запуститься раньше,
+        # чем PostgreSQL успеет полностью запуститься.
         options: --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+
     steps:
-    - uses: actions/checkout@v3
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: 3.12
 
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip setuptools
-        pip install flake8==7.3.0 flake8-isort==7.0.0
-        pip install -r ./backend/requirements.txt 
-    # Этот шаг дополним переменными для доступа к БД
-    - name: Test with flake8 and django tests
-      # Добавляем env-переменные для доступа к БД
-      env:
-        POSTGRES_USER: django_user
-        POSTGRES_PASSWORD: <PASSWORD>
-        POSTGRES_DB: django_db
-        # Сервер БД запущен в Docker, но его порт проброшен на хост
-        # Поэтому подключаемся к 127.0.0.1:5432
-        DB_HOST: 127.0.0.1
-        DB_PORT: 5432
-      run: |
-        python -m flake8 backend/
-        cd backend/
-        python manage.py test
-# .github/workflows/main.yml
+      # Получаем исходный код проекта из GitHub-репозитория.
+      - uses: actions/checkout@v3
 
-# Тут задачи тестирования и сборки образа
-# ...
-# Добавляем новую задачу: деплой приложения
+      # Устанавливаем Python на временный GitHub-раннер.
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.12
+
+      # Устанавливаем зависимости проекта.
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools
+          pip install flake8==7.3.0 flake8-isort==7.0.0
+          pip install -r ./backend/requirements.txt
+
+      # Проверяем код flake8,
+      # а затем запускаем тесты Django.
+      - name: Test with flake8 and django tests
+
+        # Переменные для подключения Django к тестовой PostgreSQL.
+        env:
+          POSTGRES_USER: django_user
+          POSTGRES_PASSWORD: <PASSWORD>
+          POSTGRES_DB: django_db
+
+          # PostgreSQL запущен в Docker,
+          # но порт 5432 проброшен на хост.
+          # Поэтому Django подключается к 127.0.0.1.
+          DB_HOST: 127.0.0.1
+          DB_PORT: 5432
+
+        run: |
+          python -m flake8 backend/
+          cd backend/
+          python manage.py test
+
+
+  # ============================================================
+  # ЗАДАЧА №2 — СОБРАТЬ BACKEND И ОТПРАВИТЬ В DOCKER HUB
+  # ============================================================
   build_and_push_to_docker_hub:
     name: Push Docker image to DockerHub
     runs-on: ubuntu-latest
+
+    # Не запускать эту задачу сразу.
+    # Сначала ждём успешного выполнения задачи tests.
     needs: tests
+
     steps:
+
+      # Каждый job запускается на новом пустом раннере,
+      # поэтому снова скачиваем исходный код проекта.
       - name: Check out the repo
-        # Получение исходного кода из репозитория
         uses: actions/checkout@v3
+
+      # Устанавливаем Docker Buildx —
+      # инструмент для сборки Docker-образов.
       - name: Set up Docker Buildx
-        # Установка сборщика контейнеров Docker
         uses: docker/setup-buildx-action@v2
-      - name: Login to Docker 
-        # Авторизация на Docker Hub
+
+      # Авторизуемся на Docker Hub.
+      - name: Login to Docker
         uses: docker/login-action@v2
-        # При помощи with передаём в action параметры username и password
         with:
+
+          # Логин и пароль берём из GitHub Secrets,
+          # поэтому они не хранятся открыто в main.yml.
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
-          # Хорошо ли держать логин и пароль прямо в коде workflow?
-          # Нет, это нехорошо
+
+      # Собираем Docker-образ backend
+      # и отправляем его на Docker Hub.
       - name: Push to DockerHub
-        # Одновременный билд и пуш образа в Docker Hub
         uses: docker/build-push-action@v4
         with:
-          # Параметр context: ./backend/ указывает, что нужный Dockerfile 
-          # находится в ./backend/
+
+          # Dockerfile для backend находится в папке backend.
           context: ./backend/
-          # Параметр push: true указывает, что образ нужно не только собрать,
-          # но и отправить на Docker Hub
+
+          # true означает:
+          # не только собрать образ, но и отправить его в Docker Hub.
           push: true
-          # В параметре tags задаётся название и тег для образа.
-          # Для каждого пересобранного образа 
-          # устанавливаем тег latest, чтобы потом
-          # на сервере и в docker-compose.yml не указывать версию
-          tags: ваш-логин-на-docker-hub/taski_backend:latest
-    frontend_tests:
+
+          # Название образа в Docker Hub.
+          # popovastr — логин Docker Hub.
+          # taski_backend — название образа.
+          # latest — тег образа.
+          tags: popovastr/taski_backend:latest
+
+
+  # ============================================================
+  # ЗАДАЧА №3 — ПРОВЕРКА ФРОНТЕНДА
+  # ============================================================
+  frontend_tests:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v3
-    - name: Set up nodeJS
-      # Это готовый воркфлоу для установки Node.js на раннер
-      uses: actions/setup-node@v3
-      with:
-        # Это параметр воркфлоу, указывающий нужную версию Node.js
-        node-version: 18
 
-    - name: Install dependencies
-      # Эта команда устанавливает зависимости для фронтенда
-      run: |
-        cd frontend/
-        npm ci
+      # Получаем код проекта из GitHub.
+      - uses: actions/checkout@v3
 
-    - name: Test frontend
-      # Запускаем тесты
-      run: |
-        cd frontend/
-        npm run test
+      # Устанавливаем Node.js.
+      # Он нужен для работы frontend.
+      - name: Set up nodeJS
+        uses: actions/setup-node@v3
+        with:
+
+          # Используем Node.js версии 18.
+          node-version: 18
+
+      # Устанавливаем зависимости frontend.
+      - name: Install dependencies
+        run: |
+          cd frontend/
+          npm ci
+
+      # Запускаем тесты frontend.
+      - name: Test frontend
+        run: |
+          cd frontend/
+          npm run test
+
+
+  # ============================================================
+  # ЗАДАЧА №4 — СОБРАТЬ FRONTEND И ОТПРАВИТЬ В DOCKER HUB
+  # ============================================================
   build_frontend_and_push_to_docker_hub:
     name: Push frontend Docker image to DockerHub
     runs-on: ubuntu-latest
+
+    # Frontend-образ собираем только после того,
+    # как успешно прошёл frontend_tests.
     needs: frontend_tests
+
     steps:
+
+      # Получаем код проекта.
       - name: Check out the repo
         uses: actions/checkout@v3
+
+      # Устанавливаем Docker Buildx.
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
-      - name: Login to Docker 
+
+      # Авторизуемся в Docker Hub.
+      - name: Login to Docker
         uses: docker/login-action@v2
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
+
+      # Собираем frontend-образ
+      # и отправляем его в Docker Hub.
       - name: Push to DockerHub
         uses: docker/build-push-action@v4
         with:
+
+          # Dockerfile frontend находится здесь.
           context: ./frontend/
+
+          # После сборки отправляем образ в Docker Hub.
           push: true
+
+          # Название frontend-образа.
           tags: popovastr/taski_frontend:latest
+
+
+  # ============================================================
+  # ЗАДАЧА №5 — СОБРАТЬ GATEWAY И ОТПРАВИТЬ В DOCKER HUB
+  # ============================================================
   build_gateway_and_push_to_docker_hub:
     name: Push gateway Docker image to DockerHub
     runs-on: ubuntu-latest
+
     steps:
+
+      # Получаем исходный код проекта.
       - name: Check out the repo
         uses: actions/checkout@v3
+
+      # Устанавливаем Docker Buildx.
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
-      - name: Login to Docker 
+
+      # Авторизуемся в Docker Hub.
+      - name: Login to Docker
         uses: docker/login-action@v2
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
+
+      # Собираем gateway-образ
+      # и отправляем его в Docker Hub.
       - name: Push to DockerHub
         uses: docker/build-push-action@v4
         with:
+
+          # Dockerfile gateway находится в папке gateway.
           context: ./gateway/
+
+          # Отправляем готовый образ в Docker Hub.
           push: true
-          # Тут вместо username должен быть ваш логин на Docker Hub
+
+          # Название gateway-образа.
           tags: popovastr/taski_gateway:latest
